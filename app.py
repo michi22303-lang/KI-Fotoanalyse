@@ -37,7 +37,6 @@ MODEL_NAME = 'gemini-2.0-flash-exp'
 
 # --- STATE ---
 if 'step' not in st.session_state: st.session_state.step = 1
-# Wir speichern die Adresse separat, damit sie manuell überschreibbar ist
 if 'manual_address' not in st.session_state: st.session_state.manual_address = ""
 if 'location_context' not in st.session_state: st.session_state.location_context = {}
 
@@ -52,10 +51,11 @@ def reset_wizard():
 @st.cache_data(ttl=60)
 def resolve_address(lat, lon):
     try:
-        geolocator = Nominatim(user_agent="fm_fix_fallback", timeout=5)
+        geolocator = Nominatim(user_agent="fm_fix_fallback_v2", timeout=5)
         location = geolocator.reverse(f"{lat}, {lon}", zoom=18)
         if location and location.address:
             parts = location.address.split(",")
+            # Nimmt Straße und Hausnummer (Index 0 und 1)
             return f"{parts[0]}, {parts[1] if len(parts)>1 else ''}"
         return f"{lat}, {lon}"
     except:
@@ -68,7 +68,7 @@ def analyze_image(image, context):
     Kontext: {context}
     
     Aufgabe:
-    1. Erkenne das technische Objekt exakt. (Achtung: Unterscheide Heizung vs. Whiteboard, Riss vs. Schatten).
+    1. Erkenne das technische Objekt exakt. (Unterscheide Heizung vs. Whiteboard, Riss vs. Schatten).
     2. Erstelle eine kurze Meldung.
 
     Format (NUR TEXT):
@@ -90,25 +90,22 @@ with c2: st.markdown("### FM-Fix Pro")
 # ==========================================
 if st.session_state.step == 1:
     
-    # --- GPS LOGIK MIT FALLBACK ---
-    # Wir rufen GPS ab. Wenn es blockiert wird, gibt es None zurück oder wirft keinen Fehler,
-    # aber Streamlit lädt neu.
-    loc = get_geolocation(enable_high_accuracy=True)
+    # --- KORREKTUR HIER: KEINE ARGUMENTE FÜR GEOLOCATION ---
+    loc = get_geolocation() 
     
     detected_address = ""
-    gps_info = "Standortsuche..."
+    gps_info = "Suche Standort..."
 
     if loc:
         lat = loc['coords']['latitude']
         lon = loc['coords']['longitude']
-        acc = loc['coords']['accuracy']
+        # Accuracy ist manchmal nicht verfügbar, daher fallback auf 0
+        acc = loc['coords'].get('accuracy', 0)
         
-        # Adresse nur auflösen, wenn wir noch keine manuelle Eingabe haben
-        # oder wenn das GPS sehr genau ist.
         resolved = resolve_address(lat, lon)
         if resolved:
             detected_address = resolved
-            gps_info = f"✅ GPS gefunden ({int(acc)}m)"
+            gps_info = f"✅ GPS gefunden"
             # Wenn das Feld noch leer ist, fülle es automatisch
             if st.session_state.manual_address == "":
                 st.session_state.manual_address = detected_address
@@ -118,11 +115,10 @@ if st.session_state.step == 1:
     # --- FORMULAR ---
     st.info("Schritt 1: Wo ist der Mangel?")
     
-    # 1. Adresse (Automatisch gefüllt oder Manuell)
     st.caption(gps_info)
     address_input = st.text_input("Adresse / Objekt", 
                                   value=st.session_state.manual_address, 
-                                  placeholder="z.B. Musterstraße 1, Hamburg")
+                                  placeholder="z.B. Hauptstraße 1")
     
     # Update Session State mit Eingabe
     st.session_state.manual_address = address_input
@@ -140,9 +136,9 @@ if st.session_state.step == 1:
     img_file = st.camera_input("Foto aufnehmen", label_visibility="visible")
 
     if img_file:
-        # Validierung: Nutzer muss eine Adresse haben (GPS oder Manuell)
+        # Validierung: Adresse muss da sein (GPS oder Manuell)
         if len(st.session_state.manual_address) < 3:
-            st.error("Bitte Adresse eingeben oder auf GPS warten!")
+            st.error("Bitte erst eine Adresse eingeben!")
         else:
             st.session_state.captured_image = Image.open(img_file)
             st.session_state.location_context = {
