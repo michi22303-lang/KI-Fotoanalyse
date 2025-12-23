@@ -35,23 +35,32 @@ if "GEMINI_API_KEY" in st.secrets:
     
 MODEL_NAME = 'gemini-2.0-flash-exp'
 
-# --- STATE ---
-if 'step' not in st.session_state: st.session_state.step = 1
-if 'manual_address' not in st.session_state: st.session_state.manual_address = ""
-if 'location_context' not in st.session_state: st.session_state.location_context = {}
+# --- STATE INITIALISIERUNG (HIER LAG DER FEHLER) ---
+# Wir müssen sicherstellen, dass ALLE Variablen existieren, bevor wir sie nutzen.
+if 'step' not in st.session_state: 
+    st.session_state.step = 1
+if 'analysis_result' not in st.session_state: 
+    st.session_state.analysis_result = None
+if 'captured_image' not in st.session_state: 
+    st.session_state.captured_image = None
+if 'manual_address' not in st.session_state: 
+    st.session_state.manual_address = ""
+if 'location_context' not in st.session_state: 
+    st.session_state.location_context = {}
 
 def reset_wizard():
     st.session_state.step = 1
     st.session_state.captured_image = None
     st.session_state.analysis_result = None
     st.session_state.manual_address = ""
+    st.session_state.location_context = {}
     st.rerun()
 
 # --- HELFER ---
 @st.cache_data(ttl=60)
 def resolve_address(lat, lon):
     try:
-        geolocator = Nominatim(user_agent="fm_fix_fallback_v2", timeout=5)
+        geolocator = Nominatim(user_agent="fm_fix_fallback_v3", timeout=5)
         location = geolocator.reverse(f"{lat}, {lon}", zoom=18)
         if location and location.address:
             parts = location.address.split(",")
@@ -90,7 +99,7 @@ with c2: st.markdown("### FM-Fix Pro")
 # ==========================================
 if st.session_state.step == 1:
     
-    # --- KORREKTUR HIER: KEINE ARGUMENTE FÜR GEOLOCATION ---
+    # GPS Logik (ohne Parameter, um Crash zu vermeiden)
     loc = get_geolocation() 
     
     detected_address = ""
@@ -99,8 +108,6 @@ if st.session_state.step == 1:
     if loc:
         lat = loc['coords']['latitude']
         lon = loc['coords']['longitude']
-        # Accuracy ist manchmal nicht verfügbar, daher fallback auf 0
-        acc = loc['coords'].get('accuracy', 0)
         
         resolved = resolve_address(lat, lon)
         if resolved:
@@ -157,20 +164,26 @@ elif st.session_state.step == 2:
     
     c_img, c_txt = st.columns([1,2])
     with c_img:
-        st.image(st.session_state.captured_image, use_container_width=True)
+        # Prüfen ob Bild da ist (Sicherheitshalber)
+        if st.session_state.captured_image:
+            st.image(st.session_state.captured_image, use_container_width=True)
     with c_txt:
         loc_data = st.session_state.location_context
-        st.caption(f"📍 {loc_data['addr']}")
-        st.caption(f"🏢 {loc_data['floor']} | {loc_data['room']}")
+        st.caption(f"📍 {loc_data.get('addr', 'Unbekannt')}")
+        st.caption(f"🏢 {loc_data.get('floor', '')} | {loc_data.get('room', '')}")
 
     # KI Analyse
+    # Hier gab es den Fehler: Wir prüfen jetzt sicher, ob die Variable existiert
     if st.session_state.analysis_result is None:
         with st.status("KI prüft Bild...", expanded=True) as status:
             try:
-                ctx_str = f"Adresse: {loc_data['addr']}, Etage: {loc_data['floor']}, Raum: {loc_data['room']}"
-                res = analyze_image(st.session_state.captured_image, ctx_str)
-                st.session_state.analysis_result = res
-                status.update(label="Fertig!", state="complete", expanded=False)
+                if st.session_state.captured_image:
+                    ctx_str = f"Adresse: {loc_data.get('addr')}, Etage: {loc_data.get('floor')}, Raum: {loc_data.get('room')}"
+                    res = analyze_image(st.session_state.captured_image, ctx_str)
+                    st.session_state.analysis_result = res
+                    status.update(label="Fertig!", state="complete", expanded=False)
+                else:
+                    st.error("Bild verloren gegangen.")
             except Exception as e:
                 st.error(f"Fehler: {e}")
                 status.update(label="Fehler", state="error")
@@ -184,8 +197,8 @@ elif st.session_state.step == 2:
         """, unsafe_allow_html=True)
         
         # Email Link
-        subject = f"Mangel: {loc_data['addr']} ({loc_data['room']})"
-        body = f"Hallo,\n\nOrt: {loc_data['addr']}\nBereich: {loc_data['floor']} - {loc_data['room']}\n\n{res}"
+        subject = f"Mangel: {loc_data.get('addr')} ({loc_data.get('room')})"
+        body = f"Hallo,\n\nOrt: {loc_data.get('addr')}\nBereich: {loc_data.get('floor')} - {loc_data.get('room')}\n\n{res}"
         
         safe_link = f"mailto:?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
         
