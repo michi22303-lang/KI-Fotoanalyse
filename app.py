@@ -4,20 +4,29 @@ from PIL import Image
 from streamlit_js_eval import get_geolocation
 from geopy.geocoders import Nominatim
 import urllib.parse
-import time
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="FM-Fix Pro", page_icon="⚓", layout="centered")
 
 st.markdown("""
     <style>
-    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
-    /* Kamera Styling */
+    .block-container { padding-top: 1rem; padding-bottom: 5rem; }
+    
+    /* Kamera Maximieren */
     [data-testid="stCameraInput"] > div { width: 100% !important; aspect-ratio: 3/4 !important; }
     [data-testid="stCameraInput"] video { object-fit: cover; }
-    /* Große Inputs für Mobile */
-    .stSelectbox > div > div { height: 3em; }
-    .stTextInput > div > div { height: 3em; }
+    
+    /* Eingabefelder Touch-freundlich */
+    .stSelectbox > div > div { height: 3em; align-items: center; }
+    .stTextInput > div > div { height: 3em; align-items: center; }
+    
+    /* Wichtige Buttons hervorheben */
+    button[kind="primary"] { 
+        background-color: #003063 !important; 
+        border: none !important;
+        height: 3.5em !important;
+        font-size: 1.1rem !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -26,153 +35,166 @@ if "GEMINI_API_KEY" in st.secrets:
     
 MODEL_NAME = 'gemini-2.0-flash-exp'
 
-# --- STATE MANAGEMENT ---
+# --- STATE ---
 if 'step' not in st.session_state: st.session_state.step = 1
-if 'location_data' not in st.session_state: st.session_state.location_data = {"addr": "Suche...", "floor": "EG", "room": ""}
+# Wir speichern die Adresse separat, damit sie manuell überschreibbar ist
+if 'manual_address' not in st.session_state: st.session_state.manual_address = ""
+if 'location_context' not in st.session_state: st.session_state.location_context = {}
 
 def reset_wizard():
     st.session_state.step = 1
     st.session_state.captured_image = None
     st.session_state.analysis_result = None
+    st.session_state.manual_address = ""
     st.rerun()
 
-# --- HELFER: GENAUE ADRESSE ---
-@st.cache_data(ttl=60) # Kurzes Caching für Bewegung
+# --- HELFER ---
+@st.cache_data(ttl=60)
 def resolve_address(lat, lon):
     try:
-        # Timeout erhöht, Zoom Level 18 für Hausnummer-Genauigkeit
-        geolocator = Nominatim(user_agent="fm_fix_pro_v2", timeout=10)
-        location = geolocator.reverse(f"{lat}, {lon}", zoom=18) 
-        
-        # Adresse putzen
+        geolocator = Nominatim(user_agent="fm_fix_fallback", timeout=5)
+        location = geolocator.reverse(f"{lat}, {lon}", zoom=18)
         if location and location.address:
             parts = location.address.split(",")
-            # Versuche Straße + Hausnummer + PLZ zu greifen
             return f"{parts[0]}, {parts[1] if len(parts)>1 else ''}"
         return f"{lat}, {lon}"
     except:
-        return f"GPS: {lat:.5f}, {lon:.5f}"
+        return ""
 
-# --- KI ANALYSE ---
-def analyze_image(image, context_text):
+def analyze_image(image, context):
     model = genai.GenerativeModel(MODEL_NAME)
     prompt = f"""
     Rolle: Facility Management Experte.
-    Kontext: {context_text}
+    Kontext: {context}
     
     Aufgabe:
-    1. Erkenne das technische Objekt/Problem genau (Vermeide Verwechslungen wie Whiteboard vs. Heizung).
-    2. Erstelle eine strukturierte Meldung.
+    1. Erkenne das technische Objekt exakt. (Achtung: Unterscheide Heizung vs. Whiteboard, Riss vs. Schatten).
+    2. Erstelle eine kurze Meldung.
 
-    Format (NUR DIESEN TEXT AUSGEBEN):
+    Format (NUR TEXT):
     GEWERK: [Gewerk]
-    ORT: [Genauer Raum/Etage aus Kontext]
-    MANGEL: [Kurze Beschreibung]
+    ORT: [Raum/Etage aus Kontext]
+    MANGEL: [Beschreibung]
     PRIO: [1-5]
     VORSCHLAG: [Maßnahme]
     """
     return model.generate_content([prompt, image]).text.strip()
 
-# --- HEADER ---
+# --- UI HEADER ---
 c1, c2 = st.columns([1, 6])
 with c1: st.markdown("### ⚓")
 with c2: st.markdown("### FM-Fix Pro")
 
 # ==========================================
-# SCHRITT 1: ORT & DETAILS (Der "Check-In")
+# SCHRITT 1: STANDORT & FOTO
 # ==========================================
 if st.session_state.step == 1:
-    st.info("📍 Schritt 1: Standort & Details")
     
-    # 1. GPS Abfrage mit 'enableHighAccuracy'
-    # Hinweis: Auf dem iPhone muss der Browser Zugriff auf 'Genauer Standort' haben!
+    # --- GPS LOGIK MIT FALLBACK ---
+    # Wir rufen GPS ab. Wenn es blockiert wird, gibt es None zurück oder wirft keinen Fehler,
+    # aber Streamlit lädt neu.
     loc = get_geolocation(enable_high_accuracy=True)
     
-    gps_status = "⏳ Warte auf GPS..."
-    
+    detected_address = ""
+    gps_info = "Standortsuche..."
+
     if loc:
         lat = loc['coords']['latitude']
         lon = loc['coords']['longitude']
-        acc = loc['coords']['accuracy'] # Genauigkeit in Metern
+        acc = loc['coords']['accuracy']
         
-        # Adresse auflösen
-        addr = resolve_address(lat, lon)
-        st.session_state.location_data["addr"] = addr
-        
-        # Farbliche Indikation der Genauigkeit
-        if acc < 20:
-            gps_status = f"✅ GPS Präzise ({int(acc)}m): {addr}"
-        else:
-            gps_status = f"⚠️ GPS Ungenau ({int(acc)}m): {addr}"
+        # Adresse nur auflösen, wenn wir noch keine manuelle Eingabe haben
+        # oder wenn das GPS sehr genau ist.
+        resolved = resolve_address(lat, lon)
+        if resolved:
+            detected_address = resolved
+            gps_info = f"✅ GPS gefunden ({int(acc)}m)"
+            # Wenn das Feld noch leer ist, fülle es automatisch
+            if st.session_state.manual_address == "":
+                st.session_state.manual_address = detected_address
+    else:
+        gps_info = "⚠️ Kein GPS (Bitte Adresse eingeben)"
+
+    # --- FORMULAR ---
+    st.info("Schritt 1: Wo ist der Mangel?")
     
-    st.write(gps_status)
+    # 1. Adresse (Automatisch gefüllt oder Manuell)
+    st.caption(gps_info)
+    address_input = st.text_input("Adresse / Objekt", 
+                                  value=st.session_state.manual_address, 
+                                  placeholder="z.B. Musterstraße 1, Hamburg")
     
-    # 2. Etage & Raum (GPS Höhe ist unbrauchbar, daher manuell)
-    col_floor, col_room = st.columns(2)
-    with col_floor:
+    # Update Session State mit Eingabe
+    st.session_state.manual_address = address_input
+
+    # 2. Etage & Raum
+    col_f, col_r = st.columns(2)
+    with col_f:
         floor = st.selectbox("Etage", ["UG", "EG", "1. OG", "2. OG", "3. OG", "4. OG", "Dach"], index=1)
-    with col_room:
-        room = st.text_input("Raum Nr. / Bez.", placeholder="z.B. 204 oder Küche")
-    
-    # Daten speichern für nächsten Schritt
-    st.session_state.location_data["floor"] = floor
-    st.session_state.location_data["room"] = room
+    with col_r:
+        room = st.text_input("Raum", placeholder="z.B. Küche")
 
     st.markdown("---")
     
-    # 3. Kamera Starten
-    img_file = st.camera_input("Beweisfoto aufnehmen", label_visibility="visible")
+    # 3. Kamera (Groß)
+    img_file = st.camera_input("Foto aufnehmen", label_visibility="visible")
 
     if img_file:
-        st.session_state.captured_image = Image.open(img_file)
-        st.session_state.step = 2
-        st.rerun()
+        # Validierung: Nutzer muss eine Adresse haben (GPS oder Manuell)
+        if len(st.session_state.manual_address) < 3:
+            st.error("Bitte Adresse eingeben oder auf GPS warten!")
+        else:
+            st.session_state.captured_image = Image.open(img_file)
+            st.session_state.location_context = {
+                "addr": st.session_state.manual_address,
+                "floor": floor,
+                "room": room
+            }
+            st.session_state.step = 2
+            st.rerun()
 
 # ==========================================
-# SCHRITT 2: ANALYSE & ACTION
+# SCHRITT 2: CHECK & SEND
 # ==========================================
 elif st.session_state.step == 2:
-    st.info("🚀 Schritt 2: Analyse")
+    st.info("Schritt 2: Analyse")
     
-    # Bild klein anzeigen
-    st.image(st.session_state.captured_image, width=150)
-    
-    # Kontext für die KI zusammenbauen
-    full_context = f"""
-    Adresse: {st.session_state.location_data['addr']}
-    Etage: {st.session_state.location_data['floor']}
-    Raum: {st.session_state.location_data['room']}
-    """
+    c_img, c_txt = st.columns([1,2])
+    with c_img:
+        st.image(st.session_state.captured_image, use_container_width=True)
+    with c_txt:
+        loc_data = st.session_state.location_context
+        st.caption(f"📍 {loc_data['addr']}")
+        st.caption(f"🏢 {loc_data['floor']} | {loc_data['room']}")
 
-    # Automatische Analyse
+    # KI Analyse
     if st.session_state.analysis_result is None:
-        with st.status("KI analysiert Bild & Standort...", expanded=True) as status:
+        with st.status("KI prüft Bild...", expanded=True) as status:
             try:
-                res = analyze_image(st.session_state.captured_image, full_context)
+                ctx_str = f"Adresse: {loc_data['addr']}, Etage: {loc_data['floor']}, Raum: {loc_data['room']}"
+                res = analyze_image(st.session_state.captured_image, ctx_str)
                 st.session_state.analysis_result = res
                 status.update(label="Fertig!", state="complete", expanded=False)
             except Exception as e:
                 st.error(f"Fehler: {e}")
-                status.update(label="Error", state="error")
+                status.update(label="Fehler", state="error")
 
-    # Ergebnis
+    # Ergebnis Anzeige
     if res := st.session_state.analysis_result:
         st.markdown(f"""
-        <div style="background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #ddd; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-            <div style="font-weight:bold; color:#555; margin-bottom:5px;">📍 {st.session_state.location_data['floor']} | {st.session_state.location_data['room']}</div>
-            <pre style="font-family: sans-serif; white-space: pre-wrap; margin: 0; font-size: 16px;">{res}</pre>
+        <div style="background-color:#f8f9fa; padding:15px; border-radius:8px; border-left: 5px solid #003063; margin-top:10px;">
+            <pre style="font-family:sans-serif; white-space:pre-wrap; margin:0;">{res}</pre>
         </div>
         """, unsafe_allow_html=True)
-
-        # Mail Link bauen
-        subject = f"Mangel: {st.session_state.location_data['floor']} {st.session_state.location_data['room']}"
-        body = f"Moin,\n\n{full_context}\n\nBEFUND:\n{res}\n\nGesendet mit FM-Fix Pro."
         
-        mail_link = f"mailto:?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
+        # Email Link
+        subject = f"Mangel: {loc_data['addr']} ({loc_data['room']})"
+        body = f"Hallo,\n\nOrt: {loc_data['addr']}\nBereich: {loc_data['floor']} - {loc_data['room']}\n\n{res}"
+        
+        safe_link = f"mailto:?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
         
         st.markdown("<br>", unsafe_allow_html=True)
-        c_send, c_back = st.columns([2, 1])
-        with c_send:
-            st.link_button("✉️ Senden", mail_link, type="primary", use_container_width=True)
-        with c_back:
-            st.button("🔄 Neu", on_click=reset_wizard, use_container_width=True)
+        st.link_button("✉️ Bericht senden", safe_link, type="primary", use_container_width=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.button("Startseite", on_click=reset_wizard, use_container_width=True)
