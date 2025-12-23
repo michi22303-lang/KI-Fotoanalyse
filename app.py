@@ -5,34 +5,37 @@ from streamlit_js_eval import get_geolocation
 from geopy.geocoders import Nominatim
 import urllib.parse
 
-# --- KONFIGURATION & CSS (MOBILE FIRST) ---
-st.set_page_config(page_title="FM-Fix Mobile", page_icon="⚓", layout="centered")
+# --- KONFIGURATION & CSS (MOBILE OPTIMIZED) ---
+st.set_page_config(page_title="FM-Fix Wizard", page_icon="⚓", layout="centered")
 
 st.markdown("""
     <style>
-    /* Ränder auf dem Handy entfernen für mehr Platz */
+    /* Container Ränder minimieren für Mobile */
     .block-container {
-        padding-top: 1rem;
-        padding-bottom: 5rem;
-        padding-left: 1rem;
-        padding-right: 1rem;
+        padding-top: 0.5rem;
+        padding-bottom: 2rem;
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
     }
-    /* Button Styling: Groß und Touch-freundlich */
+    /* VERSUCH: Kamera größer machen auf Mobile */
+    [data-testid="stCameraInput"] > div {
+        width: 100% !important;
+        aspect-ratio: 3/4 !important; /* Hochformat erzwingen falls möglich */
+    }
+    [data-testid="stCameraInput"] video {
+         object-fit: cover;
+    }
+
+    /* Buttons */
     .stButton>button {
         width: 100%;
         border-radius: 12px;
-        height: 3.5em;
-        background-color: #003063;
-        color: white;
-        font-size: 18px;
+        height: 3em;
         font-weight: 600;
-        border: none;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    /* Kamera-Label ausblenden */
-    .stCameraInput > label { display: none; }
-    /* Header kleiner machen */
-    h1 { font-size: 1.8rem !important; margin-bottom: 0 !important; }
+    /* Header kleiner */
+    h1 { font-size: 1.5rem !important; margin-bottom: 0 !important; }
+    h3 { font-size: 1.2rem !important; margin-top: 10px !important;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -40,103 +43,130 @@ st.markdown("""
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.warning("⚠️ API Key fehlt in st.secrets")
+    st.error("⚠️ API Key fehlt!")
 
-MODEL_NAME = 'gemini-2.0-flash-exp' 
+# Wir bleiben bei Flash für Geschwindigkeit, verbessern aber den Prompt.
+MODEL_NAME = 'gemini-2.0-flash-exp'
 
-# --- CACHED FUNCTIONS (PERFORMANCE) ---
-@st.cache_data(ttl=300) # Cache für 5 Minuten, spart API Calls
+# --- STATE MANAGEMENT (WIZARD LOGIK) ---
+if 'step' not in st.session_state:
+    st.session_state.step = 1
+if 'captured_image' not in st.session_state:
+    st.session_state.captured_image = None
+if 'analysis_result' not in st.session_state:
+    st.session_state.analysis_result = None
+if 'current_address' not in st.session_state:
+    st.session_state.current_address = "Wird ermittelt..."
+
+def reset_wizard():
+    st.session_state.step = 1
+    st.session_state.captured_image = None
+    st.session_state.analysis_result = None
+    st.rerun()
+
+# --- FUNKTIONEN ---
+@st.cache_data(ttl=300)
 def get_address_cached(lat, lon):
     try:
-        # Timeout erhöht für langsame Mobilverbindungen
-        geolocator = Nominatim(user_agent="fm_fix_mobile_app", timeout=10)
+        geolocator = Nominatim(user_agent="fm_fix_wizard", timeout=10)
         location = geolocator.reverse(f"{lat}, {lon}")
-        # Adresse verkürzen (nur Straße + Stadt), spart Platz auf dem iPhone
-        address_parts = location.address.split(",")
-        short_address = f"{address_parts[0]},{address_parts[1]},{address_parts[3]}" if len(address_parts) > 3 else location.address
-        return short_address
+        parts = location.address.split(",")
+        # Versuch einer kurzen Adresse: Straße HNr, Stadtteil
+        if len(parts) >= 4:
+             return f"{parts[0].strip()},{parts[2].strip()}"
+        return location.address
     except:
         return f"GPS: {lat:.4f}, {lon:.4f}"
 
-# --- APP LOGIK ---
+# --- KI ANALYSE FUNKTION ---
+def analyze_image(image, address):
+    model = genai.GenerativeModel(MODEL_NAME)
+    # NEUER PROMPT: "Chain of Thought" - Erst denken, dann formatieren.
+    prompt = f"""
+    Du bist ein erfahrener Facility Manager. Deine Aufgabe ist die visuelle Inspektion von Mängeln.
+    Standort: {address}.
 
-# Header Bereich (Kompakt)
-c1, c2 = st.columns([1, 5])
-with c1:
-    st.markdown("# ⚓")
-with c2:
-    st.title("FM-Fix")
-    st.caption("Schnellmeldung Hamburg")
-
-# 1. Standort (Automatisch & Unauffällig)
-loc = get_geolocation()
-current_address = "Standort wird ermittelt..."
-
-if loc:
-    lat = loc['coords']['latitude']
-    lon = loc['coords']['longitude']
-    current_address = get_address_cached(lat, lon)
-    st.info(f"📍 {current_address}")
-else:
-    st.markdown("Waiting for GPS...")
-
-
-# 2. Kamera (Der Fokus der App)
-img_file = st.camera_input("Foto machen", label_visibility="collapsed")
-
-if img_file:
-    # Bild wird sofort angezeigt durch camera_input, wir laden es nur für Gemini
-    img = Image.open(img_file)
+    Schritt 1: Analysiere das Bild visuell. Was ist das Hauptobjekt? (Unterscheide genau: Ein Whiteboard ist keine Heizung, ein Riss in der Wand ist kein Rohrbruch). In welchem Zustand ist es?
     
-    # Analyse Button
-    if st.button("🚀 ANALYSIEREN"):
-        # Status Container sieht auf Mobile besser aus als Spinner
-        with st.status("KI wertet aus...", expanded=True) as status:
+    Schritt 2: Basierend auf Schritt 1, extrahiere die Fakten in das geforderte Kurzformat.
+
+    Gib NUR das finale Format aus Schritt 2 zurück (keine Einleitung):
+    GEWERK: [z.B. Sanitär, Elektro, Bau, Reinigung]
+    SCHADEN: [Präzise Beschreibung in max 5 Wörtern]
+    PRIO: [Niedrig/Mittel/Hoch]
+    MASSNAHME: [Vorschlag in max 5 Wörtern]
+    """
+    response = model.generate_content([prompt, image])
+    return response.text.strip()
+
+# --- APP START ---
+c1, c2 = st.columns([1, 6])
+with c1: st.markdown("### ⚓")
+with c2: st.markdown("### FM-Fix Wizard")
+
+# ==========================================
+# WIZARD SCHRITT 1: STANDORT & FOTO
+# ==========================================
+if st.session_state.step == 1:
+    st.info("Schritt 1: Foto aufnehmen")
+    
+    # Standort im Hintergrund
+    loc = get_geolocation()
+    if loc:
+        lat = loc['coords']['latitude']
+        lon = loc['coords']['longitude']
+        st.session_state.current_address = get_address_cached(lat, lon)
+        st.caption(f"📍 {st.session_state.current_address}")
+
+    # Die Kamera - möglichst groß durch CSS Hacks oben
+    img_file = st.camera_input("Kamera", label_visibility="collapsed")
+
+    if img_file:
+        # Foto speichern und zum nächsten Schritt wechseln
+        st.session_state.captured_image = Image.open(img_file)
+        st.session_state.step = 2
+        st.rerun() # Seite neu laden für Schritt 2
+
+# ==========================================
+# WIZARD SCHRITT 2: ANALYSE & VERSAND
+# ==========================================
+elif st.session_state.step == 2:
+    st.info("Schritt 2: Überprüfen & Senden")
+    
+    # Kleineres Vorschaubild
+    st.image(st.session_state.captured_image, width=200)
+
+    # Automatische Analyse, falls noch nicht geschehen
+    if st.session_state.analysis_result is None:
+        with st.status("KI analysiert das Bild...", expanded=True) as status:
             try:
-                model = genai.GenerativeModel(MODEL_NAME)
-                
-                # PROMPT OPTIMIERUNG: Maximale Kürze gefordert
-                prompt = f"""
-                Du bist ein technischer Assistent im Facility Management.
-                Analysiere das Bild. Standort: {current_address}.
-                
-                Antworte NUR in diesem exakten Format (keine Einleitung, kein Markdown Fettgedruckt):
-                
-                GEWERK: [Nur das Gewerk]
-                SCHADEN: [Maximal 5 Wörter Beschreibung]
-                PRIO: [Niedrig/Mittel/Hoch]
-                MASSNAHME: [Maximal 5 Wörter Aktion]
-                """
-                
-                response = model.generate_content([prompt, img])
-                result_text = response.text.strip()
-                
-                st.session_state['result'] = result_text
-                status.update(label="Fertig!", state="complete", expanded=False)
-                
+                result = analyze_image(st.session_state.captured_image, st.session_state.current_address)
+                st.session_state.analysis_result = result
+                status.update(label="Analyse abgeschlossen!", state="complete", expanded=False)
             except Exception as e:
-                st.error(f"Fehler: {e}")
-                status.update(label="Fehler", state="error")
+                st.error(f"KI Fehler: {e}")
+                status.update(label="Fehler bei Analyse", state="error")
+    
+    # Ergebnis anzeigen, wenn vorhanden
+    if res := st.session_state.analysis_result:
+        st.markdown(f"""
+        <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #003063;">
+            <pre style="font-family: sans-serif; white-space: pre-wrap; margin: 0;">{res}</pre>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.write("") # Abstand
 
-# 3. Ergebnis Anzeige (Karten-Stil für Mobile)
-if 'result' in st.session_state and img_file:
-    res = st.session_state['result']
-    
-    # Visuelle Darstellung als Info-Box
-    st.markdown(f"""
-    <div style="background-color: white; padding: 15px; border-radius: 10px; border-left: 5px solid #003063; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-        <pre style="font-family: sans-serif; white-space: pre-wrap; margin: 0;">{res}</pre>
-    </div>
-    """, unsafe_allow_html=True)
+        # Email vorbereiten
+        subject = "FM-Meldung (Wizard)"
+        body = f"Moin Backoffice,\n\nStandort: {st.session_state.current_address}\n\n{res}\n\nGesendet via FM-Fix."
+        safe_body = urllib.parse.quote(body)
+        safe_subject = urllib.parse.quote(subject)
+        mail_link = f"mailto:backoffice@firma.de?subject={safe_subject}&body={safe_body}"
 
-    # Email Vorbereitung (Sicher encodiert)
-    subject = "FM-Meldung"
-    body = f"Moin,\n\nStandort: {current_address}\n\n{res}\n\nGesendet via FM-Fix WebApp."
-    
-    # Sicherstellen, dass Umlaute und Leerzeichen funktionieren
-    safe_body = urllib.parse.quote(body)
-    safe_subject = urllib.parse.quote(subject)
-    mail_link = f"mailto:?subject={safe_subject}&body={safe_body}"
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.link_button("✉️ An Backoffice senden", mail_link, type="primary")
+        # Buttons nebeneinander
+        col_send, col_reset = st.columns([2, 1])
+        with col_send:
+            st.link_button("✉️ Meldung abschicken", mail_link, type="primary", use_container_width=True)
+        with col_reset:
+            st.button("🔄 Neu", on_click=reset_wizard, use_container_width=True)
